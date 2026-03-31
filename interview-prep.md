@@ -15,6 +15,8 @@
 6. [SIEM, Monitoring & Incident Response](#6-siem-monitoring--incident-response)
 7. [Privileged Access Management (PAM)](#7-privileged-access-management-pam)
 8. [Senior / Multi-Project Management Scenarios](#8-senior--multi-project-management-scenarios)
+9. [Architecture Diagrams](#9-architecture-diagrams)
+10. [Detailed Troubleshooting Reference](#10-detailed-troubleshooting-reference)
 
 ---
 
@@ -655,6 +657,627 @@ This is a phased, risk-managed rollout:
 | PTA | Pass-Through Authentication |
 | CA | Conditional Access |
 | DCSync | AD replication abuse attack technique |
+
+---
+
+*Good luck with your interview! Focus on demonstrating both deep technical depth AND the ability to communicate risk and strategy to non-technical stakeholders — that is what separates senior engineers from staff/principal-level candidates.*
+
+---
+
+## 9. Architecture Diagrams
+
+### 9.1 Multi-Site Active Directory
+
+The diagram below shows a typical enterprise multi-site, multi-domain Active Directory deployment spanning two geographic regions, connected by WAN site links, with each site containing dedicated Domain Controllers.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════════════╗
+║                          FOREST: corp.com  (Schema / Config Partition)              ║
+║                                                                                      ║
+║  ┌─────────────────────────────────┐         ┌──────────────────────────────────┐   ║
+║  │       DOMAIN: corp.com          │         │      DOMAIN: emea.corp.com        │   ║
+║  │  (Forest Root / US HQ Domain)  │◄───────►│      (Child Domain / Europe)     │   ║
+║  └─────────────────────────────────┘  Parent │  └─────────────────────────────┘  │   ║
+║            │                          -Child │                                    │   ║
+║            │                          Trust  │                                    │   ║
+║  ╔═════════╧══════════════╗                  ╔═════════════════════════╗          ║
+║  ║    SITE: US-HQ          ║                  ║   SITE: EMEA-London      ║          ║
+║  ║  (Subnet 10.1.0.0/16)  ║                  ║  (Subnet 10.20.0.0/16)  ║          ║
+║  ║                         ║                  ║                          ║          ║
+║  ║  ┌─────────────────┐   ║                  ║  ┌──────────────────┐   ║          ║
+║  ║  │  DC1-US-HQ      │   ║                  ║  │  DC1-EMEA-LON    │   ║          ║
+║  ║  │  PDC Emulator   │   ║                  ║  │  GC / RODC       │   ║          ║
+║  ║  │  RID Master     │   ║                  ║  └──────────────────┘   ║          ║
+║  ║  │  GC Server      │   ║   Site Link:     ║                          ║          ║
+║  ║  └────────┬────────┘   ║   WAN (MPLS)     ║  ┌──────────────────┐   ║          ║
+║  ║           │            ║◄────────────────►║  │  DC2-EMEA-LON    │   ║          ║
+║  ║  ┌────────┴────────┐   ║  Cost: 100       ║  │  GC Server       │   ║          ║
+║  ║  │  DC2-US-HQ      │   ║  Interval: 15min ║  └──────────────────┘   ║          ║
+║  ║  │  GC Server      │   ║                  ╚═════════════════════════╝          ║
+║  ║  └─────────────────┘   ║                                                        ║
+║  ╚════════════════════════╝                  ╔═════════════════════════╗          ║
+║                                              ║   SITE: APAC-Singapore   ║          ║
+║  ╔═════════════════════════╗                 ║  (Subnet 10.30.0.0/16)  ║          ║
+║  ║    SITE: US-DR           ║                 ║                          ║          ║
+║  ║  (Subnet 10.2.0.0/16)  ║                 ║  ┌──────────────────┐   ║          ║
+║  ║                          ║   Site Link:   ║  │  DC1-APAC-SIN    │   ║          ║
+║  ║  ┌──────────────────┐   ║   WAN           ║  │  GC / RODC       │   ║          ║
+║  ║  │  DC1-US-DR       │   ║◄──────────────►║  └──────────────────┘   ║          ║
+║  ║  │  GC Server       │   ║  Cost: 200      ╚═════════════════════════╝          ║
+║  ║  │  (DR / Standby)  │   ║                                                        ║
+║  ║  └──────────────────┘   ║                                                        ║
+║  ╚════════════════════════╝                                                         ║
+║                                                                                      ║
+║  FSMO Role Placement (corp.com):                                                     ║
+║  ┌───────────────────────────────────────────────────────────────────────────────┐  ║
+║  │  Schema Master         → DC1-US-HQ (forest-wide, one per forest)             │  ║
+║  │  Domain Naming Master  → DC1-US-HQ (forest-wide, one per forest)             │  ║
+║  │  PDC Emulator          → DC1-US-HQ (per domain — time sync, auth fallback)   │  ║
+║  │  RID Master            → DC1-US-HQ (per domain — allocates RID pools)        │  ║
+║  │  Infrastructure Master → DC2-US-HQ (per domain — NOT on GC if multi-domain)  │  ║
+║  └───────────────────────────────────────────────────────────────────────────────┘  ║
+╚══════════════════════════════════════════════════════════════════════════════════════╝
+
+Legend:
+  ◄───────► = Two-way transitive trust (automatic parent-child)
+  ╔═══╗     = AD Site boundary
+  GC       = Global Catalog server
+  RODC     = Read-Only Domain Controller (branch offices / low-security locations)
+```
+
+**Key Design Decisions:**
+- Every site with >200 users should have a local DC to avoid WAN authentication latency.
+- Branch offices with limited physical security → deploy RODCs (Read-Only DCs); credentials not stored locally.
+- Site Links should reflect actual WAN topology: `Cost` (lower = preferred path) and `Replication Interval` (default 180 min inter-site).
+- Infrastructure Master must **not** reside on a Global Catalog server in multi-domain forests.
+- Place PDC Emulator in the site with the best WAN connectivity — it receives authentication failures first and is the primary time sync source.
+
+---
+
+### 9.2 Azure AD Connect (Entra Connect) — Hybrid Identity Architecture
+
+The diagram below shows a hybrid identity environment with Entra Connect synchronizing on-premises AD to Entra ID (Azure AD), including Password Hash Sync, Pass-Through Authentication agents, and federation options.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║                          ON-PREMISES ENVIRONMENT                                         ║
+║                                                                                          ║
+║  ┌──────────────────────┐     LDAP/     ┌──────────────────────────────────────────┐   ║
+║  │  Active Directory    │◄────Kerberos──│         Entra Connect Server             │   ║
+║  │  corp.com            │               │  (Windows Server — dedicated, non-DC)    │   ║
+║  │                      │               │                                            │   ║
+║  │  ┌────────────────┐  │               │  ┌───────────────────────────────────┐   │   ║
+║  │  │ DC1 / DC2      │  │               │  │  Sync Engine                      │   │   ║
+║  │  │ (LDAP source)  │  │               │  │  ┌──────────┐  ┌──────────────┐  │   │   ║
+║  │  └────────────────┘  │               │  │  │ Connector│  │ Metaverse    │  │   │   ║
+║  │                      │               │  │  │ (AD DS)  │─►│ (staging DB) │  │   │   ║
+║  │  Objects synced:     │               │  │  └──────────┘  └──────┬───────┘  │   │   ║
+║  │  - Users             │               │  │                        │           │   │   ║
+║  │  - Groups            │               │  │  ┌─────────────────────▼───────┐  │   │   ║
+║  │  - Contacts          │               │  │  │ Connector (Azure AD)         │  │   │   ║
+║  │  - Devices           │               │  │  └─────────────────────────────┘  │   │   ║
+║  └──────────────────────┘               │  └───────────────────────────────────┘   │   ║
+║                                          │                                            │   ║
+║  ┌──────────────────────┐               │  Sync Mode (choose one):                  │   ║
+║  │  Staging Entra       │               │  ┌─────────────────────────────────────┐  │   ║
+║  │  Connect Server      │               │  │ ● PHS  — password hashes synced     │  │   ║
+║  │  (Hot Standby)       │               │  │ ○ PTA  — auth passes to on-prem     │  │   ║
+║  │  Staging Mode = ON   │               │  │ ○ Federation (AD FS)                │  │   ║
+║  └──────────────────────┘               │  └─────────────────────────────────────┘  │   ║
+║                                          └─────────────────────┬────────────────────┘   ║
+║  ┌──────────────────────┐                                       │                        ║
+║  │  AD FS Farm          │                 HTTPS/443             │  HTTPS                 ║
+║  │  (only if Federation)│◄──────────────────────────────────────┤                        ║
+║  │  sts.corp.com        │                                        │                        ║
+║  └──────────────────────┘                                        │                        ║
+║                                                                   │                        ║
+║  ┌────────────────────────────────────┐                          │                        ║
+║  │  PTA Agents (Pass-Through Auth)    │◄─────────────────────────┘                        ║
+║  │  corp-pta-agent01 / 02             │  (only if PTA mode)                               ║
+║  │  Installed on member servers       │                                                    ║
+║  └────────────────────────────────────┘                                                   ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝
+                          │
+                          │  Encrypted HTTPS sync tunnel
+                          │  (port 443 outbound only — no inbound firewall rules needed)
+                          ▼
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║                          MICROSOFT CLOUD (Entra ID Tenant)                               ║
+║                                                                                          ║
+║  ┌──────────────────────────────────────────────────────────────────────────────────┐   ║
+║  │                         Entra ID (Azure AD) Tenant                               │   ║
+║  │                                                                                    │   ║
+║  │  Synchronized objects:       Sign-in policies:                                    │   ║
+║  │  ┌────────────────────┐      ┌───────────────────────────────────┐               │   ║
+║  │  │ Users (cloud copy) │      │ Conditional Access Policies        │               │   ║
+║  │  │ Groups             │      │  - Require MFA for all users       │               │   ║
+║  │  │ Contacts           │      │  - Block legacy auth               │               │   ║
+║  │  │ Devices (hybrid    │      │  - Compliant device required       │               │   ║
+║  │  │   joined)          │      └───────────────────────────────────┘               │   ║
+║  │  └────────────────────┘                                                            │   ║
+║  │                                                                                    │   ║
+║  │  Auth flow per sync mode:                                                          │   ║
+║  │  ┌─────────────────────────────────────────────────────────────────────────────┐  │   ║
+║  │  │  PHS:   User → Entra ID → validates against synced hash  → ✓ / ✗           │  │   ║
+║  │  │  PTA:   User → Entra ID → PTA agent → on-prem DC validates → ✓ / ✗         │  │   ║
+║  │  │  ADFS:  User → Entra ID → redirects to AD FS → SAML token issued → ✓ / ✗  │  │   ║
+║  │  └─────────────────────────────────────────────────────────────────────────────┘  │   ║
+║  │                                                                                    │   ║
+║  │  Connected apps:   Microsoft 365 │ Azure Resources │ SaaS apps (SAML/OIDC)       │   ║
+║  └──────────────────────────────────────────────────────────────────────────────────┘   ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝
+
+Sync Schedule: Default delta sync every 30 minutes (configurable)
+               Full sync: on-demand or after schema changes
+```
+
+**Key Ports & Network Requirements:**
+
+| Direction | Source | Destination | Port | Purpose |
+|---|---|---|---|---|
+| Outbound | Entra Connect | `*.msappproxy.net` | TCP 443 | Sync to Entra ID |
+| Outbound | Entra Connect | AD DS DCs | TCP/UDP 389, 636, 3268 | LDAP / LDAPS / GC |
+| Outbound | Entra Connect | AD DS DCs | TCP/UDP 88 | Kerberos |
+| Outbound | PTA Agent | `*.msappproxy.net` | TCP 443 | Auth relay |
+| Inbound  | None required | — | — | No inbound firewall rules needed |
+
+**Entra Connect Filtering Options:**
+- **Domain/OU-based** – sync only specific OUs (exclude service accounts OU, admin accounts OU).
+- **Attribute-based** – sync only users where `extensionAttribute1 = "Sync"`.
+- **Group-based** – pilot mode: sync only members of a specific group (max 50k members).
+
+---
+
+### 9.3 Kerberos Authentication Flow Diagram
+
+```
+  CLIENT                   KDC (DC)               TARGET SERVICE
+  (workstation)            AS + TGS               (file server, app)
+      │                        │                         │
+      │──── 1. AS-REQ ────────►│                         │
+      │  (username +           │                         │
+      │   encrypted timestamp) │                         │
+      │                        │                         │
+      │◄─── 2. AS-REP ─────────│                         │
+      │  (TGT encrypted with   │                         │
+      │   krbtgt key +         │                         │
+      │   session key)         │                         │
+      │                        │                         │
+      │──── 3. TGS-REQ ───────►│                         │
+      │  (TGT + service SPN)   │                         │
+      │                        │                         │
+      │◄─── 4. TGS-REP ────────│                         │
+      │  (Service Ticket       │                         │
+      │   encrypted with       │                         │
+      │   target service key)  │                         │
+      │                        │                         │
+      │──── 5. AP-REQ ─────────────────────────────────►│
+      │  (Service Ticket)      │                         │
+      │                        │                         │
+      │◄─── 6. AP-REP ─────────────────────────────────►│
+      │  (mutual auth confirm) │              (validates ticket,
+      │                        │               grants access)
+      │                        │                         │
+
+Attack surface mapping:
+  Step 1-2 → AS-REP Roasting  (pre-auth disabled accounts)
+  Step 3-4 → Kerberoasting    (service account with SPN, request TGS offline crack)
+  TGT forgery → Golden Ticket  (requires krbtgt hash)
+  TGS forgery → Silver Ticket  (requires service account hash)
+```
+
+---
+
+## 10. Detailed Troubleshooting Reference
+
+### 10.1 AD Replication Troubleshooting (Step-by-Step)
+
+**Symptom:** Users in Site B cannot authenticate, or objects created in Site A are not visible in Site B.
+
+#### Step 1 — Check replication summary across all DCs
+```
+repadmin /replsummary
+```
+Look for: `Fails`, `Delta` (time since last successful sync). Any non-zero `Fails` or `Delta > 1 hour` is a problem.
+
+#### Step 2 — Show replication status per DC
+```
+repadmin /showrepl
+repadmin /showrepl DC2-US-HQ /errorsonly
+```
+Output shows: each replication partner, last attempt, last success, consecutive failures, error code.
+
+#### Step 3 — Force replication and check
+```
+# Force sync from a specific partner
+repadmin /sync dc=corp,dc=com DC2-US-HQ <source-DC-GUID>
+
+# Force sync all partitions from all partners
+repadmin /syncall /AdeP
+```
+Flags: `/A` = all partitions, `/d` = identify by DN, `/e` = enterprise (cross-site), `/P` = push mode.
+
+#### Step 4 — Identify the error code
+
+| Error Code | Meaning | Fix |
+|---|---|---|
+| 1256 | Remote procedure call failed | Check network/firewall (RPC ports TCP 135, 49152–65535) |
+| 1722 | RPC server unavailable | DNS resolution failure or DC offline |
+| 1753 | No more endpoints | RPC endpoint mapper issue; restart `NTDS` service |
+| 8453 | Replication access denied | Check replication permissions on domain NC head |
+| 8606 | Insufficient attributes | Lingering object; run `repadmin /removelingeringobjects` |
+| -2146893022 | Target principal name incorrect | SPN mismatch; run `netdom resetpwd` on affected DC |
+| 1396 | Logon failure target account name incorrect | `krbtgt` account or SPN issue |
+
+#### Step 5 — Check DC health
+```
+dcdiag /test:replications /v
+dcdiag /test:connectivity /v
+dcdiag /test:DNS /v
+dcdiag /test:KccEvent /v
+dcdiag /test:NCSecDesc /v   # replication permissions check
+```
+
+#### Step 6 — Check Event Viewer on both DCs
+- `Directory Service` log → Event IDs **1864** (replication not occurred in N days), **1311** (KCC topology error), **1388** (lingering object inbound) / **1862** (replication partner unresponsive) (lingering objects).
+- `System` log → Event ID **5774** (DC cannot register DNS SRV records).
+
+#### Step 7 — Fix lingering objects (if detected)
+```
+# Find lingering objects
+repadmin /removelingeringobjects <DestDC> <SourceDC-GUID> <NC> /advisory_mode
+
+# Remove them (after review)
+repadmin /removelingeringobjects <DestDC> <SourceDC-GUID> dc=corp,dc=com
+```
+
+---
+
+### 10.2 Kerberos Authentication Troubleshooting (Step-by-Step)
+
+**Symptoms:** "The security database on the server does not have a computer account for this workstation," KDC errors, Event ID 4771.
+
+#### Step 1 — Check clock skew (most common cause)
+Kerberos tolerates only ±5 minutes of clock difference.
+```powershell
+# Check DC time
+w32tm /query /status
+
+# Force re-sync
+w32tm /resync /force
+
+# Check all DCs in the domain
+Get-ADDomainController -Filter * | ForEach-Object {
+    $name = $_.Name
+    $time = Invoke-Command -ComputerName $name { (Get-Date).ToString("HH:mm:ss") }
+    [PSCustomObject]@{ DC = $name; Time = $time }
+}
+```
+
+#### Step 2 — Inspect current Kerberos tickets
+```
+# List all cached tickets
+klist
+
+# Purge ticket cache (force re-authentication)
+klist purge
+
+# Check tickets for a specific service
+klist tickets
+```
+
+#### Step 3 — Diagnose with Event IDs
+
+| Event ID | Location | Meaning | Action |
+|---|---|---|---|
+| 4771 | DC Security log | Kerberos pre-auth failed | Wrong password, account locked, or disabled |
+| 4768 | DC Security log | TGT requested (success/fail) | Baseline normal; alert on failures |
+| 4769 | DC Security log | Service ticket requested | Monitor for RC4 encryption requests (Kerberoasting) |
+| 4772 | DC Security log | Kerberos auth ticket request failed | Account expired / smart card issue |
+| 14 | System log | KDC cannot find name | SPN not registered |
+
+#### Step 4 — Check SPNs
+```
+# Find all SPNs for a service account
+setspn -L serviceaccount
+
+# Find duplicate SPNs (common cause of Kerberos failures)
+setspn -X -F
+
+# Register a missing SPN
+setspn -A HTTP/webserver.corp.com corp\websvcaccount
+```
+
+#### Step 5 — Test Kerberos end-to-end
+```powershell
+# Test authentication to a service
+Test-ComputerSecureChannel -Verbose
+
+# Re-secure the channel if broken
+Test-ComputerSecureChannel -Repair -Credential (Get-Credential)
+```
+
+---
+
+### 10.3 Group Policy (GPO) Troubleshooting (Step-by-Step)
+
+**Symptom:** GPO settings not applying, or wrong settings applying to a machine/user.
+
+#### Step 1 — Generate RSoP (Resultant Set of Policy)
+```
+# Quick summary on the local machine
+gpresult /R
+
+# Detailed HTML report
+gpresult /H C:\Reports\gpresult.html /F
+
+# For a remote computer / specific user
+gpresult /S <computername> /U corp\username /H C:\Reports\gpresult.html /F
+```
+
+#### Step 2 — Force a GPO refresh
+```
+# Local machine
+gpupdate /force
+
+# Remote computers (PowerShell — requires WinRM)
+Invoke-GPUpdate -Computer "WS001" -Force -RandomDelayInMinutes 0
+```
+
+#### Step 3 — Check SYSVOL replication
+GPO files live in `\\<domain>\SYSVOL` — if SYSVOL is not replicating, GPOs can't apply.
+```
+# Check SYSVOL replication health (DFS-R)
+dfsrdiag ReplicationState
+
+# Check DFS-R event log
+Get-WinEvent -LogName "DFS Replication" -MaxEvents 50 | Where-Object { $_.LevelDisplayName -ne "Information" }
+
+# Check SYSVOL share exists on all DCs
+Get-ADDomainController -Filter * | ForEach-Object {
+    Test-Path "\\$($_.Name)\SYSVOL"
+}
+```
+
+#### Step 4 — Verify LSDOU order and inheritance
+```
+# Show applied GPOs and their order
+gpresult /R | Select-String -Pattern "Applied GPO|Denied GPO|Reason"
+```
+Check for:
+- **Block Inheritance** on an OU (visible in GPMC with a blue exclamation icon).
+- **Enforced** GPOs overriding Block Inheritance (padlock icon in GPMC).
+- **WMI Filter** returning `FALSE` (GPO shows as "filtered").
+- **Security Filtering** — the computer/user account (or `Authenticated Users`) must have **Read + Apply Group Policy** permissions.
+
+#### Step 5 — Common GPO issues and fixes
+
+| Issue | Symptom | Fix |
+|---|---|---|
+| GPO not applying to computer | Setting absent from `gpresult /R` | Verify `Authenticated Users` or computer account has `Apply GP` permission on the GPO |
+| User settings not applying | Only computer settings apply | Loopback Processing may be enabled (Replace mode) — check if intentional |
+| GPO applies but setting reverts | Competing GPO with higher precedence | Check GPO link order; use Enforced if needed |
+| SYSVOL out of sync | Different GPO version on different DCs | Fix DFS-R replication; run `repadmin /syncall` |
+| WMI filter blocking GPO | GPO shows as "Denied (WMI Filter)" | Review filter logic; test with `wbemtest` or `Get-WmiObject` |
+
+---
+
+### 10.4 Entra Connect (Azure AD Connect) Troubleshooting (Step-by-Step)
+
+**Symptoms:** Users not appearing in Entra ID, password changes not syncing, sync errors in portal.
+
+#### Step 1 — Check sync status in the Entra portal
+`Entra ID Portal → Entra Connect → Sync Status`
+Look for: last sync time, staging mode status, sync errors count.
+
+#### Step 2 — Check sync errors in PowerShell
+```powershell
+# Connect to Entra ID (requires MSOnline or Microsoft.Graph module)
+Connect-MsolService
+
+# List all sync errors
+Get-MsolSyncDirectoryError | Format-List
+
+# Or use the newer Graph module
+Connect-MgGraph -Scopes "AuditLog.Read.All"
+Get-MgDirectoryDeletedItem -DirectoryObjectId <objectId>  # check for soft-deleted objects
+```
+
+#### Step 3 — View Entra Connect sync logs
+```powershell
+# Open the built-in Synchronization Service Manager UI
+"%ProgramFiles%\Microsoft Azure AD Sync\UIShell\miisclient.exe"
+```
+- **Operations tab** → see each sync cycle, errors per run step.
+- **Connectors tab** → check connector state (Running / Idle / Error).
+- **Metaverse Search** → look up specific objects and trace where they came from / where they go.
+
+#### Step 4 — Force a sync cycle
+```powershell
+# Delta sync (only changed objects since last sync)
+Start-ADSyncSyncCycle -PolicyType Delta
+
+# Full sync (re-evaluate all objects)
+Start-ADSyncSyncCycle -PolicyType Initial
+```
+
+#### Step 5 — Common sync errors and fixes
+
+| Error Code | Error Description | Root Cause | Fix |
+|---|---|---|---|
+| `AttributeValueMustBeUnique` | Duplicate proxy address / UPN | Two objects share same email/UPN | Deduplicate in on-prem AD |
+| `InvalidSoftMatch` | Soft match conflict | Multiple objects match the same cloud user | Use hard match (`ms-DS-ConsistencyGuid`) |
+| `DataValidationFailed` | Invalid attribute value | Illegal characters in display name or UPN | Clean up the attribute in AD |
+| `ObjectTypeMismatch` | User synced as contact or vice versa | Source object type mismatch | Check connector space object type mapping |
+| `ExportedChange` stuck | Object not leaving export state | Permissions on Entra connector account | Verify connector account has required roles |
+| `PasswordPolicyViolation` | PHS password hash not syncing | Cloud password policy stricter than on-prem | Check cloud minimum password age policy |
+
+#### Step 6 — Verify PTA agent health (if using Pass-Through Auth)
+```powershell
+# Check PTA agent registration on the agents server
+Get-Item "HKLM:\SOFTWARE\Microsoft\AzureADConnect\AuthenticationAgents"
+
+# View PTA agent status in portal:
+# Entra ID → Entra Connect → Pass-through authentication → Active agents
+```
+Ensure minimum 3 PTA agents deployed across different servers for HA.
+
+---
+
+### 10.5 Conditional Access Troubleshooting (Step-by-Step)
+
+**Symptom:** User being unexpectedly blocked, MFA prompt not appearing, or policy not applying as expected.
+
+#### Step 1 — Use the "What If" tool
+`Entra ID Portal → Security → Conditional Access → What If`
+- Input: user, application, IP address, device platform, sign-in risk level.
+- Output: which CA policies would apply and what controls they would enforce.
+
+#### Step 2 — Review Sign-In Logs
+`Entra ID Portal → Monitoring → Sign-in logs`
+- Filter by user, application, date range.
+- Click a sign-in entry → **Conditional Access tab** → shows each policy and its result:
+  - ✅ **Success** – policy applied, controls satisfied.
+  - ❌ **Failure** – policy applied, control not satisfied (blocked).
+  - ⚠️ **Not applied** – conditions not matched (policy did not target this sign-in).
+
+#### Step 3 — PowerShell — export CA sign-in failures
+```powershell
+Connect-MgGraph -Scopes "AuditLog.Read.All"
+
+$signIns = Get-MgAuditLogSignIn -Filter "conditionalAccessStatus eq 'failure'" -Top 100
+$signIns | Select-Object UserDisplayName, AppDisplayName, IpAddress, CreatedDateTime, ConditionalAccessStatus |
+    Export-Csv "C:\Reports\CA_Failures_$(Get-Date -Format yyyyMMdd).csv" -NoTypeInformation
+```
+
+#### Step 4 — Common CA misconfigurations and fixes
+
+| Issue | Symptom | Fix |
+|---|---|---|
+| Break-glass account blocked | Emergency admin locked out | Exclude break-glass accounts from all CA policies; secure with FIDO2 key + monitoring |
+| Named location too broad | On-prem subnet included, bypasses MFA | Audit named locations; never use /8 or /16 blocks as trusted |
+| Device compliance policy lag | User blocked on new device | Ensure Intune compliance check-in; allow 24h grace for newly enrolled devices |
+| Legacy auth not fully blocked | Old SMTP/IMAP clients still signing in | Check sign-in logs for `clientAppUsed = "Other clients"` and block via CA |
+| CA policy in Report-Only mode | Policy appears but has no enforcement | Validate in report-only → switch to Enabled after testing |
+| Guest users blocked from all apps | B2B collaboration broken | Create separate CA policies scoped to `Guest users` with appropriate controls |
+
+---
+
+### 10.6 LAPS Troubleshooting (Step-by-Step)
+
+**Symptom:** LAPS password not rotating, helpdesk cannot retrieve password, blank password attribute.
+
+#### Step 1 — Verify LAPS is installed on the endpoint
+```powershell
+# Legacy LAPS — check the CSE (Client Side Extension) DLL is present
+Get-Service AdmPwd*
+Test-Path "C:\Program Files\LAPS\CSE\AdmPwd.dll"
+
+# Windows LAPS (built-in to Windows 11 22H2+ / Server 2022 CU+)
+# Confirm the built-in cmdlets are available
+Get-Command -Module LAPS -ErrorAction SilentlyContinue
+
+# Check LAPS policy is applying
+gpresult /R | Select-String "LAPS"
+```
+
+#### Step 2 — Check the password attribute in AD
+```powershell
+# Legacy LAPS
+Get-ADComputer WS001 -Properties "ms-Mcs-AdmPwd", "ms-Mcs-AdmPwdExpirationTime" |
+    Select-Object Name, "ms-Mcs-AdmPwd", "ms-Mcs-AdmPwdExpirationTime"
+
+# Windows LAPS
+Get-LapsADPassword -Identity WS001 -AsPlainText
+```
+If `ms-Mcs-AdmPwd` is blank:
+- LAPS CSE (Client Side Extension) is not installed on the endpoint.
+- The GPO for LAPS is not reaching the computer (see GPO troubleshooting).
+- The computer account doesn't have `SELF: Write ms-Mcs-AdmPwd` permission on its own object.
+
+#### Step 3 — Check AD permissions (most common issue)
+```powershell
+# Verify LAPS schema extension exists
+Get-ADObject "CN=ms-Mcs-AdmPwd,CN=Schema,CN=Configuration,DC=corp,DC=com" -ErrorAction SilentlyContinue
+
+# Verify SELF write permission (run as Domain Admin)
+Set-AdmPwdComputerSelfPermission -OrgUnit "OU=Workstations,DC=corp,DC=com"
+
+# Verify who can READ LAPS passwords in an OU
+Find-AdmPwdExtendedRights -Identity "OU=Workstations,DC=corp,DC=com" | Format-Table
+```
+
+#### Step 4 — Force an immediate password reset
+```powershell
+# Set expiration time to now, forcing rotation on next group policy refresh
+Set-AdmPwdAccountExpiration -Identity WS001 -ExpirationTime (Get-Date)
+
+# Then trigger GP update on the endpoint
+Invoke-GPUpdate -Computer WS001 -Force
+```
+
+---
+
+### 10.7 DNS Troubleshooting for Active Directory (Step-by-Step)
+
+**Symptom:** DCs cannot be located, `dcdiag` fails, users cannot log in from specific sites.
+
+#### Step 1 — Verify SRV record registration
+```
+# Confirm DCs are registering SRV records
+nslookup -type=SRV _ldap._tcp.corp.com
+nslookup -type=SRV _kerberos._tcp.corp.com
+nslookup -type=SRV _ldap._tcp.dc._msdcs.corp.com
+nslookup -type=SRV _kerberos._tcp.<site-name>._sites.corp.com
+```
+If SRV records are missing → the DC `Netlogon` service needs to re-register them:
+```
+# Force SRV record re-registration
+nltest /dsregdns
+net stop netlogon && net start netlogon
+```
+
+#### Step 2 — Run dcdiag DNS test
+```
+dcdiag /test:DNS /DnsBasic /v
+dcdiag /test:DNS /DnsForwarders /v
+dcdiag /test:DNS /DnsDynamicUpdate /v
+```
+
+#### Step 3 — Check DNS scavenging settings
+Stale DNS records cause authentication failures if old DCs are decommissioned but records persist.
+```powershell
+# Check scavenging on DNS zones
+Get-DnsServerZone -Name "corp.com" | Select-Object ZoneName, IsScavengingEnabled, ScavengingInterval
+Get-DnsServerScavenging
+
+# Enable scavenging (if not already enabled)
+Set-DnsServerScavenging -ScavengingInterval "7.00:00:00" -PassThru
+Set-DnsServerZoneAging -Name "corp.com" -Aging $true -ScavengeServers <dns-server-ip>
+```
+
+#### Step 4 — Test DC locator
+```
+# Find the DC a client is using
+nltest /dsgetdc:corp.com /force
+
+# Find the DC for a specific site
+nltest /dsgetdc:corp.com /site:US-HQ /force
+
+# Check all DCs in the domain
+nltest /dclist:corp.com
+```
+
+#### Step 5 — Check for split-brain DNS issues
+Split-brain = internal clients resolve `corp.com` to internal IPs; external clients resolve to public IPs.
+```powershell
+# Check what DNS server the machine is using
+Get-DnsClientServerAddress -InterfaceAlias "Ethernet"
+
+# Resolve from specific DNS server to compare
+Resolve-DnsName -Name "corp.com" -Server "10.1.1.10"  # internal DNS
+Resolve-DnsName -Name "corp.com" -Server "8.8.8.8"     # external DNS (should be different)
+```
 
 ---
 
